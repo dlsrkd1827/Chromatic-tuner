@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Chromatic Tuner</title>
+<style>
+  :root{
+    --bg:#141210;
+    --bg2:#1c1815;
+    --grille:#0d0b0a;
+    --amber:#FFB627;
+    --amber-dim:#7a5a12;
+    --green:#5EEA6B;
+    --red:#FF4B3E;
+    --text:#EFE7DA;
+    --text-dim:#8a8078;
+    --mono: 'Courier New', ui-monospace, monospace;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{
+    margin:0; padding:0; height:100%;
+    background:
+      radial-gradient(ellipse at 50% -10%, #2a2420 0%, var(--bg) 60%);
+    color:var(--text);
+    font-family: -apple-system, "Pretendard", "Malgun Gothic", sans-serif;
+    overflow:hidden;
+    touch-action:manipulation;
+  }
+  .stage{
+    height:100dvh; width:100%;
+    display:flex; flex-direction:column; align-items:center; justify-content:space-between;
+    padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+  }
+  .eyebrow{
+    font-family:var(--mono); font-size:11px; letter-spacing:0.25em;
+    color:var(--text-dim); text-transform:uppercase; margin-top:4px;
+  }
+  .meter-wrap{
+    width:100%; max-width:420px;
+    display:flex; flex-direction:column; align-items:center;
+    margin-top:6px;
+  }
+  svg{ width:100%; height:auto; overflow:visible; }
+  .tick{ stroke:var(--text-dim); stroke-width:2; }
+  .tick.center{ stroke:var(--amber-dim); stroke-width:3; }
+  .needle{
+    transform-origin: 200px 190px;
+    transition: transform 90ms ease-out;
+  }
+  .note-name{
+    font-size: 96px; font-weight:800; letter-spacing:-0.02em;
+    color:var(--amber); line-height:1;
+    text-shadow: 0 0 24px rgba(255,182,39,0.35);
+    font-variant-numeric: tabular-nums;
+    transition: color 120ms ease;
+  }
+  .note-name.in-tune{ color:var(--green); text-shadow:0 0 28px rgba(94,234,107,0.5); }
+  .octave{
+    font-size:34px; font-weight:400; color:var(--text-dim); vertical-align:top; margin-left:2px;
+  }
+  .cents-row{
+    font-family:var(--mono); font-size:15px; color:var(--text-dim);
+    display:flex; gap:18px; align-items:center; margin-top:2px;
+  }
+  .cents-row .val{ color:var(--text); }
+  .freq{
+    font-family:var(--mono); font-size:13px; color:var(--text-dim); margin-top:10px; letter-spacing:0.05em;
+  }
+  .panel{
+    width:100%; max-width:420px;
+    background:var(--grille);
+    border:1px solid #2a2420;
+    border-radius:16px;
+    padding:16px 18px;
+    display:flex; flex-direction:column; gap:14px;
+  }
+  .row{ display:flex; align-items:center; justify-content:space-between; }
+  .row label{ font-size:13px; color:var(--text-dim); font-family:var(--mono); }
+  .row .a4-controls{ display:flex; align-items:center; gap:10px; font-family:var(--mono); }
+  .row .a4-controls button{
+    width:30px; height:30px; border-radius:8px; border:1px solid #35302a;
+    background:#211d19; color:var(--text); font-size:16px; cursor:pointer;
+  }
+  .row .a4-controls span{ min-width:44px; text-align:center; color:var(--amber); font-size:14px; }
+  .startbtn{
+    width:100%; padding:16px; border-radius:14px; border:none;
+    background: linear-gradient(180deg, #2a2420, #1a1512);
+    border:1px solid #3a332c;
+    color:var(--amber); font-size:16px; font-weight:700; letter-spacing:0.04em;
+    cursor:pointer;
+  }
+  .startbtn.on{
+    background: linear-gradient(180deg, #3a2e12, #241c0c);
+    border-color:var(--amber-dim);
+  }
+  .hint{ font-size:11px; color:var(--text-dim); text-align:center; line-height:1.5; }
+  .status-dot{
+    width:8px; height:8px; border-radius:50%; background:var(--text-dim); display:inline-block; margin-right:6px;
+  }
+  .status-dot.live{ background:var(--red); box-shadow:0 0 8px var(--red); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="eyebrow">CHROMATIC TUNER · A4 = <span id="a4-eyebrow">440</span>Hz</div>
+
+  <div class="meter-wrap">
+    <svg viewBox="0 0 400 220">
+      <!-- scale ticks -50..+50 cents -->
+      <g id="ticks"></g>
+      <!-- needle -->
+      <line id="needle" class="needle" x1="200" y1="190" x2="200" y2="40" stroke="var(--amber)" stroke-width="4" stroke-linecap="round"/>
+      <circle cx="200" cy="190" r="7" fill="var(--amber)"/>
+    </svg>
+
+    <div>
+      <span id="note" class="note-name">--</span><span id="octave" class="octave"></span>
+    </div>
+    <div class="cents-row">
+      <span><span class="status-dot" id="statusdot"></span>대기중</span>
+      <span>cents <span class="val" id="cents">0</span></span>
+    </div>
+    <div class="freq" id="freq">0.0 Hz</div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label>기준 피치 (A4)</label>
+      <div class="a4-controls">
+        <button id="a4down">–</button>
+        <span id="a4val">440</span>
+        <button id="a4up">+</button>
+      </div>
+    </div>
+    <button class="startbtn" id="startbtn">마이크 시작</button>
+    <div class="hint">전체 음역대(약 E1~C6)에서 가장 가까운 반음을 자동으로 잡습니다.<br>기타 줄 이름이 아닌 순수 음이름(C, C#, D…)으로 표시됩니다.</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  let a4 = 440;
+  let audioCtx, analyser, mediaStream, rafId;
+  let running = false;
+
+  const noteEl = document.getElementById('note');
+  const octEl = document.getElementById('octave');
+  const centsEl = document.getElementById('cents');
+  const freqEl = document.getElementById('freq');
+  const needle = document.getElementById('needle');
+  const startbtn = document.getElementById('startbtn');
+  const statusdot = document.getElementById('statusdot');
+  const a4valEl = document.getElementById('a4val');
+  const a4eyebrow = document.getElementById('a4-eyebrow');
+
+  // build tick marks (-50 to +50 cents, needle sweeps -45deg to +45deg)
+  const ticksG = document.getElementById('ticks');
+  for(let c=-50; c<=50; c+=10){
+    const angle = (c/50) * 45; // deg
+    const rad = (angle-90) * Math.PI/180;
+    const cx=200, cy=190, rOuter=150, rInner = (c===0? 128:136);
+    const x1 = cx + rOuter*Math.cos(rad), y1 = cy + rOuter*Math.sin(rad);
+    const x2 = cx + rInner*Math.cos(rad), y2 = cy + rInner*Math.sin(rad);
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1',x1); line.setAttribute('y1',y1);
+    line.setAttribute('x2',x2); line.setAttribute('y2',y2);
+    line.setAttribute('class', c===0 ? 'tick center' : 'tick');
+    ticksG.appendChild(line);
+  }
+
+  function freqToNote(freq){
+    const midi = 69 + 12*Math.log2(freq/a4);
+    const rounded = Math.round(midi);
+    const cents = Math.round((midi - rounded) * 100);
+    const name = NOTE_NAMES[((rounded % 12)+12)%12];
+    const octave = Math.floor(rounded/12) - 1;
+    return {name, octave, cents, midi: rounded};
+  }
+
+  // autocorrelation pitch detection (ACF2+)
+  function autoCorrelate(buf, sampleRate){
+    const SIZE = buf.length;
+    let rms = 0;
+    for(let i=0;i<SIZE;i++){ const v=buf[i]; rms += v*v; }
+    rms = Math.sqrt(rms/SIZE);
+    if(rms < 0.01) return -1; // too quiet
+
+    let r1=0, r2=SIZE-1, thres=0.2;
+    for(let i=0;i<SIZE/2;i++){ if(Math.abs(buf[i])<thres){ r1=i; break; } }
+    for(let i=1;i<SIZE/2;i++){ if(Math.abs(buf[SIZE-i])<thres){ r2=SIZE-i; break; } }
+    const trimmed = buf.slice(r1,r2);
+    const newSize = trimmed.length;
+
+    const c = new Array(newSize).fill(0);
+    for(let lag=0; lag<newSize; lag++){
+      let sum=0;
+      for(let i=0;i<newSize-lag;i++){ sum += trimmed[i]*trimmed[i+lag]; }
+      c[lag]=sum;
+    }
+    let d=0; while(c[d]>c[d+1]) d++;
+    let maxval=-1, maxpos=-1;
+    for(let i=d;i<newSize;i++){
+      if(c[i]>maxval){ maxval=c[i]; maxpos=i; }
+    }
+    let T0 = maxpos;
+    if(T0<=0) return -1;
+    // parabolic interpolation
+    const x1=c[T0-1]||c[T0], x2=c[T0], x3=c[T0+1]||c[T0];
+    const a=(x1+x3-2*x2)/2, b=(x3-x1)/2;
+    if(a) T0 = T0 - b/(2*a);
+    const freq = sampleRate/T0;
+    if(freq < 27 || freq > 4200) return -1; // ~A0 to ~C8
+    return freq;
+  }
+
+  function updateDisplay(freq){
+    if(freq<0){
+      statusdot.classList.remove('live');
+      return;
+    }
+    statusdot.classList.add('live');
+    const {name, octave, cents} = freqToNote(freq);
+    noteEl.textContent = name;
+    octEl.textContent = octave;
+    centsEl.textContent = (cents>0? '+':'') + cents;
+    freqEl.textContent = freq.toFixed(1) + ' Hz';
+
+    const inTune = Math.abs(cents) <= 5;
+    noteEl.classList.toggle('in-tune', inTune);
+
+    const angle = Math.max(-50, Math.min(50, cents)) / 50 * 45;
+    needle.setAttribute('transform', `rotate(${angle} 200 190)`);
+    needle.setAttribute('stroke', inTune ? 'var(--green)' : 'var(--amber)');
+  }
+
+  function loop(){
+    const buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    const freq = autoCorrelate(buf, audioCtx.sampleRate);
+    updateDisplay(freq);
+    rafId = requestAnimationFrame(loop);
+  }
+
+  async function start(){
+    try{
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(mediaStream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      running = true;
+      startbtn.textContent = '중지';
+      startbtn.classList.add('on');
+      loop();
+    }catch(e){
+      alert('마이크 접근에 실패했습니다: ' + e.message);
+    }
+  }
+
+  function stop(){
+    running = false;
+    if(rafId) cancelAnimationFrame(rafId);
+    if(mediaStream) mediaStream.getTracks().forEach(t=>t.stop());
+    if(audioCtx) audioCtx.close();
+    startbtn.textContent = '마이크 시작';
+    startbtn.classList.remove('on');
+    statusdot.classList.remove('live');
+    noteEl.textContent='--'; octEl.textContent=''; centsEl.textContent='0'; freqEl.textContent='0.0 Hz';
+    needle.setAttribute('transform','rotate(0 200 190)');
+  }
+
+  startbtn.addEventListener('click', ()=>{ running ? stop() : start(); });
+
+  document.getElementById('a4up').addEventListener('click', ()=>{
+    a4 = Math.min(480, a4+1); a4valEl.textContent=a4; a4eyebrow.textContent=a4;
+  });
+  document.getElementById('a4down').addEventListener('click', ()=>{
+    a4 = Math.max(400, a4-1); a4valEl.textContent=a4; a4eyebrow.textContent=a4;
+  });
+})();
+</script>
+</body>
+</html>
