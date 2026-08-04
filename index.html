@@ -95,6 +95,27 @@
     border-color:var(--amber-dim);
   }
   .hint{ font-size:11px; color:var(--text-dim); text-align:center; line-height:1.5; }
+  .mode-toggle{
+    display:flex; gap:8px; background:#100d0b; border-radius:12px; padding:4px;
+  }
+  .mode-toggle button{
+    flex:1; padding:10px 8px; border-radius:9px; border:none; background:transparent;
+    color:var(--text-dim); font-size:13px; font-family:var(--mono); cursor:pointer;
+  }
+  .mode-toggle button.active{
+    background:#2a2420; color:var(--amber); box-shadow: inset 0 0 0 1px var(--amber-dim);
+  }
+  .target-row{
+    display:none; align-items:center; justify-content:center; gap:18px;
+  }
+  .target-row.show{ display:flex; }
+  .target-row button{
+    width:44px; height:44px; border-radius:12px; border:1px solid #35302a;
+    background:#211d19; color:var(--amber); font-size:20px; cursor:pointer;
+  }
+  .target-display{ text-align:center; font-family:var(--mono); }
+  .target-display .tname{ font-size:26px; font-weight:700; color:var(--amber); }
+  .target-display .tfret{ font-size:10px; color:var(--text-dim); letter-spacing:0.15em; margin-top:2px; }
   .status-dot{
     width:8px; height:8px; border-radius:50%; background:var(--text-dim); display:inline-block; margin-right:6px;
   }
@@ -125,6 +146,20 @@
   </div>
 
   <div class="panel">
+    <div class="mode-toggle">
+      <button id="mode-auto" class="active">자동 감지</button>
+      <button id="mode-target">타겟 지정</button>
+    </div>
+
+    <div class="target-row" id="target-row">
+      <button id="target-prev">◀</button>
+      <div class="target-display">
+        <div class="tname" id="target-name">E2</div>
+        <div class="tfret" id="target-fret">FRET 0</div>
+      </div>
+      <button id="target-next">▶</button>
+    </div>
+
     <div class="row">
       <label>기준 피치 (A4)</label>
       <div class="a4-controls">
@@ -134,7 +169,7 @@
       </div>
     </div>
     <button class="startbtn" id="startbtn">마이크 시작</button>
-    <div class="hint">전체 음역대(약 E1~C6)에서 가장 가까운 반음을 자동으로 잡습니다.<br>기타 줄 이름이 아닌 순수 음이름(C, C#, D…)으로 표시됩니다.</div>
+    <div class="hint" id="hint">전체 음역대(약 E1~C6)에서 가장 가까운 반음을 자동으로 잡습니다.<br>기타 줄 이름이 아닌 순수 음이름(C, C#, D…)으로 표시됩니다.</div>
   </div>
 </div>
 
@@ -144,6 +179,17 @@
   let a4 = 440;
   let audioCtx, analyser, mediaStream, rafId;
   let running = false;
+  let mode = 'auto'; // 'auto' | 'target'
+  let targetMidi = 40; // E2
+
+  function midiToName(midi){
+    const name = NOTE_NAMES[((midi % 12)+12)%12];
+    const octave = Math.floor(midi/12) - 1;
+    return {name, octave};
+  }
+  function midiToFreq(midi){
+    return a4 * Math.pow(2, (midi-69)/12);
+  }
 
   const noteEl = document.getElementById('note');
   const octEl = document.getElementById('octave');
@@ -154,6 +200,12 @@
   const statusdot = document.getElementById('statusdot');
   const a4valEl = document.getElementById('a4val');
   const a4eyebrow = document.getElementById('a4-eyebrow');
+  const modeAutoBtn = document.getElementById('mode-auto');
+  const modeTargetBtn = document.getElementById('mode-target');
+  const targetRow = document.getElementById('target-row');
+  const targetNameEl = document.getElementById('target-name');
+  const targetFretEl = document.getElementById('target-fret');
+  const hintEl = document.getElementById('hint');
 
   // build tick marks (-50 to +50 cents, needle sweeps -45deg to +45deg)
   const ticksG = document.getElementById('ticks');
@@ -221,16 +273,28 @@
       return;
     }
     statusdot.classList.add('live');
-    const {name, octave, cents} = freqToNote(freq);
+    freqEl.textContent = freq.toFixed(1) + ' Hz';
+
+    let cents, name, octave;
+    if(mode === 'target'){
+      const targetFreq = midiToFreq(targetMidi);
+      cents = Math.round(1200 * Math.log2(freq/targetFreq));
+      const t = midiToName(targetMidi);
+      name = t.name; octave = t.octave;
+    } else {
+      const r = freqToNote(freq);
+      name = r.name; octave = r.octave; cents = r.cents;
+    }
+
     noteEl.textContent = name;
     octEl.textContent = octave;
     centsEl.textContent = (cents>0? '+':'') + cents;
-    freqEl.textContent = freq.toFixed(1) + ' Hz';
 
     const inTune = Math.abs(cents) <= 5;
     noteEl.classList.toggle('in-tune', inTune);
 
-    const angle = Math.max(-50, Math.min(50, cents)) / 50 * 45;
+    const clamped = Math.max(-50, Math.min(50, cents));
+    const angle = clamped / 50 * 45;
     needle.setAttribute('transform', `rotate(${angle} 200 190)`);
     needle.setAttribute('stroke', inTune ? 'var(--green)' : 'var(--amber)');
   }
@@ -280,6 +344,33 @@
   document.getElementById('a4down').addEventListener('click', ()=>{
     a4 = Math.max(400, a4-1); a4valEl.textContent=a4; a4eyebrow.textContent=a4;
   });
+
+  function renderTarget(){
+    const t = midiToName(targetMidi);
+    targetNameEl.textContent = t.name + t.octave;
+    const fret = targetMidi - 40; // 0 = E2 (open low E)
+    targetFretEl.textContent = 'FRET ' + fret;
+  }
+  renderTarget();
+
+  document.getElementById('target-prev').addEventListener('click', ()=>{
+    targetMidi = Math.max(28, targetMidi-1); renderTarget();
+  });
+  document.getElementById('target-next').addEventListener('click', ()=>{
+    targetMidi = Math.min(88, targetMidi+1); renderTarget();
+  });
+
+  function setMode(m){
+    mode = m;
+    modeAutoBtn.classList.toggle('active', m==='auto');
+    modeTargetBtn.classList.toggle('active', m==='target');
+    targetRow.classList.toggle('show', m==='target');
+    hintEl.innerHTML = m==='target'
+      ? '◀▶로 원하는 프렛(반음)을 선택하면, 실제 감지된 음이 아니라 그 타겟 음 기준으로 얼마나 어긋났는지 보여줍니다.'
+      : '전체 음역대(약 E1~C6)에서 가장 가까운 반음을 자동으로 잡습니다.<br>기타 줄 이름이 아닌 순수 음이름(C, C#, D…)으로 표시됩니다.';
+  }
+  modeAutoBtn.addEventListener('click', ()=>setMode('auto'));
+  modeTargetBtn.addEventListener('click', ()=>setMode('target'));
 })();
 </script>
 </body>
