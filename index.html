@@ -64,6 +64,11 @@
     display:flex; gap:18px; align-items:center; margin-top:2px;
   }
   .cents-row .val{ color:var(--text); }
+  .detected-row{
+    display:none; font-family:var(--mono); font-size:14px; color:var(--text-dim); margin-top:2px;
+  }
+  .detected-row.show{ display:block; }
+  .detected-row .val{ color:var(--amber); font-weight:700; }
   .freq{
     font-family:var(--mono); font-size:13px; color:var(--text-dim); margin-top:10px; letter-spacing:0.05em;
   }
@@ -142,6 +147,7 @@
       <span><span class="status-dot" id="statusdot"></span>대기중</span>
       <span>cents <span class="val" id="cents">0</span></span>
     </div>
+    <div class="detected-row" id="detected-row">감지된 음 <span class="val" id="detected-note">--</span></div>
     <div class="freq" id="freq">0.0 Hz</div>
   </div>
 
@@ -206,6 +212,8 @@
   const targetNameEl = document.getElementById('target-name');
   const targetFretEl = document.getElementById('target-fret');
   const hintEl = document.getElementById('hint');
+  const detectedRow = document.getElementById('detected-row');
+  const detectedNoteEl = document.getElementById('detected-note');
 
   // build tick marks (-50 to +50 cents, needle sweeps -45deg to +45deg)
   const ticksG = document.getElementById('ticks');
@@ -231,7 +239,8 @@
     return {name, octave, cents, midi: rounded};
   }
 
-  // autocorrelation pitch detection (ACF2+)
+  // autocorrelation pitch detection, restricted to a plausible lag range,
+  // with sub-harmonic correction to avoid octave-up errors on low strings (E1 etc).
   function autoCorrelate(buf, sampleRate){
     const SIZE = buf.length;
     let rms = 0;
@@ -239,51 +248,100 @@
     rms = Math.sqrt(rms/SIZE);
     if(rms < 0.01) return -1; // too quiet
 
-    let r1=0, r2=SIZE-1, thres=0.2;
-    for(let i=0;i<SIZE/2;i++){ if(Math.abs(buf[i])<thres){ r1=i; break; } }
-    for(let i=1;i<SIZE/2;i++){ if(Math.abs(buf[SIZE-i])<thres){ r2=SIZE-i; break; } }
-    const trimmed = buf.slice(r1,r2);
-    const newSize = trimmed.length;
+    // only search lags corresponding to ~24Hz .. ~1300Hz (covers full guitar range with margin)
+    const minLag = Math.floor(sampleRate/1300);
+    const maxLag = Math.min(SIZE-2, Math.ceil(sampleRate/24));
 
-    const c = new Array(newSize).fill(0);
-    for(let lag=0; lag<newSize; lag++){
+    const c = new Float64Array(maxLag+1);
+    for(let lag=minLag; lag<=maxLag; lag++){
       let sum=0;
-      for(let i=0;i<newSize-lag;i++){ sum += trimmed[i]*trimmed[i+lag]; }
-      c[lag]=sum;
+      const n = SIZE - lag;
+      for(let i=0;i<n;i++){ sum += buf[i]*buf[i+lag]; }
+      c[lag] = sum / n; // normalize by count so longer lags aren't unfairly penalized
     }
-    let d=0; while(c[d]>c[d+1]) d++;
-    let maxval=-1, maxpos=-1;
-    for(let i=d;i<newSize;i++){
-      if(c[i]>maxval){ maxval=c[i]; maxpos=i; }
+
+    // find global best lag in range
+    let maxval=-Infinity, maxpos=-1;
+    for(let lag=minLag; lag<=maxLag; lag++){
+      if(c[lag]>maxval){ maxval=c[lag]; maxpos=lag; }
     }
-    let T0 = maxpos;
-    if(T0<=0) return -1;
-    // parabolic interpolation
-    const x1=c[T0-1]||c[T0], x2=c[T0], x3=c[T0+1]||c[T0];
+    if(maxpos<0 || maxval<=0) return -1;
+
+    // sub-harmonic correction: if a LONGER lag (lower frequency) also correlates
+    // almost as strongly, prefer it — this is what fixes "E1 detected as E3".
+    let bestLag = maxpos;
+    for(let mult=2; mult<=4; mult++){
+      const cand = Math.round(maxpos * mult);
+      if(cand > maxLag) break;
+      // check a small neighborhood around the candidate for its true local peak
+      let localBest=-Infinity, localPos=-1;
+      const lo = Math.max(minLag, cand-2), hi = Math.min(maxLag, cand+2);
+      for(let l=lo; l<=hi; l++){ if(c[l]>localBest){ localBest=c[l]; localPos=l; } }
+      if(localPos>0 && localBest >= maxval*0.85){
+        bestLag = localPos; // keep checking larger multiples too
+      }
+    }
+
+    let T0 = bestLag;
+    // parabolic interpolation around chosen lag
+    const x1=c[T0-1]!==undefined?c[T0-1]:c[T0], x2=c[T0], x3=c[T0+1]!==undefined?c[T0+1]:c[T0];
     const a=(x1+x3-2*x2)/2, b=(x3-x1)/2;
     if(a) T0 = T0 - b/(2*a);
     const freq = sampleRate/T0;
-    if(freq < 27 || freq > 4200) return -1; // ~A0 to ~C8
+    if(freq < 24 || freq > 1300) return -1;
+    return freq;
+  }
+
+  // smoothing: require the detected note to be stable across recent frames
+  // before trusting it, so single-frame octave glitches don't flash on screen.
+  const recentMidi = [];
+  function stabilize(rawMidi){
+    recentMidi.push(rawMidi);
+    if(recentMidi.length > 6) recentMidi.shift();
+    if(recentMidi.length < 3) return rawMidi;
+    const counts = {};
+    let bestVal=rawMidi, bestCount=0;
+    for(const m of recentMidi){
+      counts[m] = (counts[m]||0)+1;
+      if(counts[m]>bestCount){ bestCount=counts[m]; bestVal=m; }
+    }
+    return bestVal;
+  }
+
+  function foldToOctave(freq, refFreq){
+    // shift freq by octaves until it sits within one octave of refFreq —
+    // corrects stray octave-detection errors once we trust refFreq's note.
+    while(freq < refFreq/Math.SQRT2) freq *= 2;
+    while(freq > refFreq*Math.SQRT2) freq /= 2;
     return freq;
   }
 
   function updateDisplay(freq){
     if(freq<0){
       statusdot.classList.remove('live');
+      recentMidi.length = 0;
       return;
     }
     statusdot.classList.add('live');
     freqEl.textContent = freq.toFixed(1) + ' Hz';
 
     let cents, name, octave;
+    const rawMidi = Math.round(69 + 12*Math.log2(freq/a4));
+    const stableMidi = stabilize(rawMidi);
+    const stableNote = midiToName(stableMidi);
+
     if(mode === 'target'){
       const targetFreq = midiToFreq(targetMidi);
-      cents = Math.round(1200 * Math.log2(freq/targetFreq));
+      const adjusted = foldToOctave(freq, targetFreq);
+      cents = Math.round(1200 * Math.log2(adjusted/targetFreq));
       const t = midiToName(targetMidi);
       name = t.name; octave = t.octave;
+      detectedNoteEl.textContent = stableNote.name + stableNote.octave;
     } else {
-      const r = freqToNote(freq);
-      name = r.name; octave = r.octave; cents = r.cents;
+      const refFreq = midiToFreq(stableMidi);
+      const adjusted = foldToOctave(freq, refFreq);
+      cents = Math.round(1200 * Math.log2(adjusted/refFreq));
+      name = stableNote.name; octave = stableNote.octave;
     }
 
     noteEl.textContent = name;
@@ -304,7 +362,7 @@
     analyser.getFloatTimeDomainData(buf);
     const freq = autoCorrelate(buf, audioCtx.sampleRate);
     updateDisplay(freq);
-    rafId = requestAnimationFrame(loop);
+    rafId = setTimeout(loop, 60); // ~16fps is plenty for a tuner and eases CPU load
   }
 
   async function start(){
@@ -313,9 +371,10 @@
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const source = audioCtx.createMediaStreamSource(mediaStream);
       analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
+      analyser.fftSize = 4096; // wide enough window to resolve low strings (E1 ~41Hz) reliably
       source.connect(analyser);
       running = true;
+      recentMidi.length = 0;
       startbtn.textContent = '중지';
       startbtn.classList.add('on');
       loop();
@@ -326,7 +385,7 @@
 
   function stop(){
     running = false;
-    if(rafId) cancelAnimationFrame(rafId);
+    if(rafId) clearTimeout(rafId);
     if(mediaStream) mediaStream.getTracks().forEach(t=>t.stop());
     if(audioCtx) audioCtx.close();
     startbtn.textContent = '마이크 시작';
@@ -365,6 +424,7 @@
     modeAutoBtn.classList.toggle('active', m==='auto');
     modeTargetBtn.classList.toggle('active', m==='target');
     targetRow.classList.toggle('show', m==='target');
+    detectedRow.classList.toggle('show', m==='target');
     hintEl.innerHTML = m==='target'
       ? '◀▶로 원하는 프렛(반음)을 선택하면, 실제 감지된 음이 아니라 그 타겟 음 기준으로 얼마나 어긋났는지 보여줍니다.'
       : '전체 음역대(약 E1~C6)에서 가장 가까운 반음을 자동으로 잡습니다.<br>기타 줄 이름이 아닌 순수 음이름(C, C#, D…)으로 표시됩니다.';
