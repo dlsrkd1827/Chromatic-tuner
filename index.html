@@ -118,6 +118,11 @@
     width:44px; height:44px; border-radius:12px; border:1px solid #35302a;
     background:#211d19; color:var(--amber); font-size:20px; cursor:pointer;
   }
+  .target-row button#target-play{ font-size:15px; }
+  .target-row button#target-play.playing{
+    background:linear-gradient(180deg, #3a2e12, #241c0c);
+    border-color:var(--amber-dim); color:var(--green);
+  }
   .target-display{ text-align:center; font-family:var(--mono); }
   .target-display .tname{ font-size:26px; font-weight:700; color:var(--amber); }
   .target-display .tfret{ font-size:10px; color:var(--text-dim); letter-spacing:0.15em; margin-top:2px; }
@@ -164,6 +169,7 @@
         <div class="tfret" id="target-fret">FRET 0</div>
       </div>
       <button id="target-next">▶</button>
+      <button id="target-play" title="기준음 듣기">▶︎♪</button>
     </div>
 
     <div class="row">
@@ -409,6 +415,7 @@
     targetNameEl.textContent = t.name + t.octave;
     const fret = targetMidi - 40; // 0 = E2 (open low E)
     targetFretEl.textContent = 'FRET ' + fret;
+    if(refOsc){ refOsc.frequency.setValueAtTime(midiToFreq(targetMidi), refAudioCtx.currentTime); }
   }
   renderTarget();
 
@@ -419,12 +426,46 @@
     targetMidi = Math.min(88, targetMidi+1); renderTarget();
   });
 
+  // reference tone playback — a plain sine wave at the target frequency,
+  // on its own AudioContext so it works whether or not the mic is running.
+  let refAudioCtx, refOsc, refGain, refPlaying = false;
+  const targetPlayBtn = document.getElementById('target-play');
+
+  function startRefTone(){
+    refAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    refOsc = refAudioCtx.createOscillator();
+    refGain = refAudioCtx.createGain();
+    refOsc.type = 'sine';
+    refOsc.frequency.setValueAtTime(midiToFreq(targetMidi), refAudioCtx.currentTime);
+    refGain.gain.setValueAtTime(0, refAudioCtx.currentTime);
+    refGain.gain.linearRampToValueAtTime(0.25, refAudioCtx.currentTime + 0.05); // avoid click
+    refOsc.connect(refGain).connect(refAudioCtx.destination);
+    refOsc.start();
+    refPlaying = true;
+    targetPlayBtn.classList.add('playing');
+    targetPlayBtn.textContent = '■';
+  }
+  function stopRefTone(){
+    if(refGain && refAudioCtx){
+      const now = refAudioCtx.currentTime;
+      refGain.gain.linearRampToValueAtTime(0, now + 0.05);
+      const osc = refOsc, ctx = refAudioCtx;
+      setTimeout(()=>{ try{ osc.stop(); ctx.close(); }catch(e){} }, 80);
+    }
+    refOsc = null; refGain = null; refAudioCtx = null;
+    refPlaying = false;
+    targetPlayBtn.classList.remove('playing');
+    targetPlayBtn.textContent = '▶︎♪';
+  }
+  targetPlayBtn.addEventListener('click', ()=>{ refPlaying ? stopRefTone() : startRefTone(); });
+
   function setMode(m){
     mode = m;
     modeAutoBtn.classList.toggle('active', m==='auto');
     modeTargetBtn.classList.toggle('active', m==='target');
     targetRow.classList.toggle('show', m==='target');
     detectedRow.classList.toggle('show', m==='target');
+    if(m==='auto' && refPlaying) stopRefTone();
     hintEl.innerHTML = m==='target'
       ? '◀▶로 원하는 프렛(반음)을 선택하면, 실제 감지된 음이 아니라 그 타겟 음 기준으로 얼마나 어긋났는지 보여줍니다.'
       : '전체 음역대(약 E1~C6)에서 가장 가까운 반음을 자동으로 잡습니다.<br>기타 줄 이름이 아닌 순수 음이름(C, C#, D…)으로 표시됩니다.';
