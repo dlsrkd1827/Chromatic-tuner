@@ -81,6 +81,8 @@
     display:flex; flex-direction:column; gap:14px;
   }
   .row{ display:flex; align-items:center; justify-content:space-between; }
+  #octave-row{ display:none; }
+  #octave-row.show{ display:flex; }
   .row label{ font-size:13px; color:var(--text-dim); font-family:var(--mono); }
   .row .a4-controls{ display:flex; align-items:center; gap:10px; font-family:var(--mono); }
   .row .a4-controls button{
@@ -157,6 +159,11 @@
   </div>
 
   <div class="panel">
+    <div class="mode-toggle" id="inst-toggle">
+      <button id="inst-guitar" class="active">기타 E2~</button>
+      <button id="inst-bass">베이스 E1~</button>
+    </div>
+
     <div class="mode-toggle">
       <button id="mode-auto" class="active">자동 감지</button>
       <button id="mode-target">타겟 지정</button>
@@ -166,10 +173,19 @@
       <button id="target-prev">◀</button>
       <div class="target-display">
         <div class="tname" id="target-name">E2</div>
-        <div class="tfret" id="target-fret">FRET 0</div>
+        <div class="tfret" id="target-fret">NO.1 · +0반음</div>
       </div>
       <button id="target-next">▶</button>
       <button id="target-play" title="기준음 듣기">재생</button>
+    </div>
+
+    <div class="row" id="octave-row">
+      <label>재생 옥타브</label>
+      <div class="a4-controls">
+        <button id="oct-down">–</button>
+        <span id="oct-val">+0</span>
+        <button id="oct-up">+</button>
+      </div>
     </div>
 
     <div class="row">
@@ -192,7 +208,12 @@
   let audioCtx, analyser, mediaStream, rafId;
   let running = false;
   let mode = 'auto'; // 'auto' | 'target'
-  let targetMidi = 40; // E2
+  let inst = 'guitar';
+  // guitar: E2(40) .. G5(79) — the 40-note table
+  // bass:   E1(28) .. G3(55) — 4-string bass, open low E up through the G string
+  const RANGES = { guitar:{lo:40, hi:79}, bass:{lo:28, hi:55} };
+  let targetMidi = RANGES.guitar.lo;
+  let playOctave = 0; // reference-tone octave shift, for audibility on small speakers
 
   function midiToName(midi){
     const name = NOTE_NAMES[((midi % 12)+12)%12];
@@ -220,6 +241,10 @@
   const hintEl = document.getElementById('hint');
   const detectedRow = document.getElementById('detected-row');
   const detectedNoteEl = document.getElementById('detected-note');
+  const instGuitarBtn = document.getElementById('inst-guitar');
+  const instBassBtn = document.getElementById('inst-bass');
+  const octaveRow = document.getElementById('octave-row');
+  const octValEl = document.getElementById('oct-val');
 
   // build tick marks (-50 to +50 cents, needle sweeps -45deg to +45deg)
   const ticksG = document.getElementById('ticks');
@@ -256,7 +281,7 @@
     if(rms < 0.01) return -1; // too quiet
 
     const minLag = Math.max(2, Math.floor(sampleRate/1300));
-    const maxLag = Math.min(SIZE-2, Math.ceil(sampleRate/28));
+    const maxLag = Math.min(SIZE-2, Math.ceil(sampleRate/35)); // 35Hz floor covers bass E1 (41.2Hz)
 
     const nsdf = new Float64Array(maxLag+2);
     for(let tau=minLag; tau<=maxLag; tau++){
@@ -295,7 +320,7 @@
     if(a) T0 = T0 - b/(2*a);
 
     const freq = sampleRate/T0;
-    if(freq < 28 || freq > 1300) return -1;
+    if(freq < 35 || freq > 1300) return -1;
     return freq;
   }
 
@@ -378,7 +403,7 @@
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const source = audioCtx.createMediaStreamSource(mediaStream);
       analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 4096; // wide enough window to resolve low strings (E1 ~41Hz) reliably
+      analyser.fftSize = 8192; // long enough window to resolve bass E1 (41.2Hz) reliably
       source.connect(analyser);
       running = true;
       recentMidi.length = 0;
@@ -413,58 +438,109 @@
 
   // reference tone playback — a plain sine wave at the target frequency,
   // on its own AudioContext so it works whether or not the mic is running.
-  // Declared before renderTarget() because that function reads refOsc.
-  let refAudioCtx = null, refOsc = null, refGain = null, refPlaying = false;
+  // Declared before renderTarget() because that function calls updateRefTone().
+  let refAudioCtx = null, refNodes = null, refPlaying = false;
   const targetPlayBtn = document.getElementById('target-play');
 
   function renderTarget(){
     const t = midiToName(targetMidi);
     targetNameEl.textContent = t.name + t.octave;
-    const idx = targetMidi - 40 + 1;   // 1 = E2 (표의 번호 1), 40 = G5
-    targetFretEl.textContent = 'NO.' + idx + ' · +' + (targetMidi - 40) + '반음';
-    if(refOsc && refAudioCtx){
-      try{ refOsc.frequency.setValueAtTime(midiToFreq(targetMidi), refAudioCtx.currentTime); }catch(e){}
-    }
+    const idx = targetMidi - RANGES[inst].lo + 1;
+    targetFretEl.textContent = 'NO.' + idx + ' · +' + (targetMidi - RANGES[inst].lo) + '반음';
+    updateRefTone();
   }
   renderTarget();
 
   document.getElementById('target-prev').addEventListener('click', ()=>{
-    targetMidi = Math.max(40, targetMidi-1); renderTarget();  // 40 = E2, 6번줄 개방현
+    targetMidi = Math.max(RANGES[inst].lo, targetMidi-1); renderTarget();
   });
   document.getElementById('target-next').addEventListener('click', ()=>{
-    targetMidi = Math.min(79, targetMidi+1); renderTarget();  // 79 = G5, 1번줄 15프렛
+    targetMidi = Math.min(RANGES[inst].hi, targetMidi+1); renderTarget();
   });
+
+  // A pure sine at 41Hz (low E on bass) is nearly inaudible on a phone speaker —
+  // the driver physically can't move enough air that low. So the reference tone is
+  // built from a fundamental PLUS harmonics: even when the speaker drops the
+  // fundamental, the harmonic series still conveys the pitch (missing-fundamental
+  // effect). Lower notes also get more gain and more harmonic content.
+  function buildRefTone(freq){
+    const ctx = refAudioCtx;
+    const master = ctx.createGain();
+
+    // low notes need more help: more partials, louder
+    const lowness = Math.max(0, Math.min(1, (220 - freq) / 180)); // 0 at 220Hz+, 1 at 40Hz
+    const partialCount = Math.round(4 + lowness * 6);             // 4 .. 10 partials
+    const baseGain = 0.16 + lowness * 0.30;                        // 0.16 .. 0.46
+
+    const oscs = [];
+    for(let h=1; h<=partialCount; h++){
+      const f = freq * h;
+      if(f > 6000) break;
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(f, ctx.currentTime);
+      // fundamental kept modest for low notes (speaker can't render it anyway),
+      // harmonics carry the audible pitch
+      let amp;
+      if(h === 1) amp = 1.0 - lowness * 0.45;
+      else amp = (1 / Math.pow(h, 0.85)) * (0.5 + lowness * 0.7);
+      g.gain.setValueAtTime(amp, ctx.currentTime);
+      osc.connect(g).connect(master);
+      osc.start();
+      oscs.push({osc, g, harmonic: h});
+    }
+
+    master.gain.setValueAtTime(0, ctx.currentTime);
+    master.gain.linearRampToValueAtTime(baseGain, ctx.currentTime + 0.05);
+    master.connect(ctx.destination);
+    return { master, oscs };
+  }
+
+  function currentRefFreq(){
+    return midiToFreq(targetMidi) * Math.pow(2, playOctave);
+  }
 
   function startRefTone(){
     try{
       refAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      refOsc = refAudioCtx.createOscillator();
-      refGain = refAudioCtx.createGain();
-      refOsc.type = 'sine';
-      refOsc.frequency.setValueAtTime(midiToFreq(targetMidi), refAudioCtx.currentTime);
-      refGain.gain.setValueAtTime(0, refAudioCtx.currentTime);
-      refGain.gain.linearRampToValueAtTime(0.25, refAudioCtx.currentTime + 0.05); // avoid click
-      refOsc.connect(refGain).connect(refAudioCtx.destination);
-      refOsc.start();
+      refNodes = buildRefTone(currentRefFreq());
       refPlaying = true;
       targetPlayBtn.classList.add('playing');
       targetPlayBtn.textContent = '정지';
     }catch(e){
-      refAudioCtx = null; refOsc = null; refGain = null; refPlaying = false;
+      refAudioCtx = null; refNodes = null; refPlaying = false;
     }
   }
+
   function stopRefTone(){
-    if(refGain && refAudioCtx){
-      const now = refAudioCtx.currentTime;
-      refGain.gain.linearRampToValueAtTime(0, now + 0.05);
-      const osc = refOsc, ctx = refAudioCtx;
-      setTimeout(()=>{ try{ osc.stop(); ctx.close(); }catch(e){} }, 80);
+    if(refNodes && refAudioCtx){
+      const ctx = refAudioCtx, nodes = refNodes;
+      try{
+        nodes.master.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.05);
+      }catch(e){}
+      setTimeout(()=>{
+        try{ nodes.oscs.forEach(o=>o.osc.stop()); ctx.close(); }catch(e){}
+      }, 90);
     }
-    refOsc = null; refGain = null; refAudioCtx = null;
+    refNodes = null; refAudioCtx = null;
     refPlaying = false;
     targetPlayBtn.classList.remove('playing');
     targetPlayBtn.textContent = '재생';
   }
+
+  // retune a playing tone in place when target or octave changes
+  function updateRefTone(){
+    if(!refPlaying || !refNodes || !refAudioCtx) return;
+    const f = currentRefFreq();
+    const now = refAudioCtx.currentTime;
+    try{
+      refNodes.oscs.forEach(o=>{
+        o.osc.frequency.setValueAtTime(f * o.harmonic, now);
+      });
+    }catch(e){}
+  }
+
   targetPlayBtn.addEventListener('click', ()=>{ refPlaying ? stopRefTone() : startRefTone(); });
 
   function setMode(m){
@@ -473,13 +549,40 @@
     modeTargetBtn.classList.toggle('active', m==='target');
     targetRow.classList.toggle('show', m==='target');
     detectedRow.classList.toggle('show', m==='target');
+    octaveRow.classList.toggle('show', m==='target');
     if(m==='auto' && refPlaying) stopRefTone();
     hintEl.innerHTML = m==='target'
-      ? '◀▶로 원하는 프렛(반음)을 선택하면, 실제 감지된 음이 아니라 그 타겟 음 기준으로 얼마나 어긋났는지 보여줍니다.'
-      : '전체 음역대(약 E1~C6)에서 가장 가까운 반음을 자동으로 잡습니다.<br>기타 줄 이름이 아닌 순수 음이름(C, C#, D…)으로 표시됩니다.';
+      ? '◀▶로 타겟 음을 고르고 재생을 누르면 기준음이 납니다. 저음이 잘 안 들리면 재생 옥타브를 +1로 올려서 귀로 맞추세요.'
+      : '전체 음역대에서 가장 가까운 반음을 자동으로 잡습니다.<br>기타 줄 이름이 아닌 순수 음이름(C, C#, D…)으로 표시됩니다.';
   }
   modeAutoBtn.addEventListener('click', ()=>setMode('auto'));
   modeTargetBtn.addEventListener('click', ()=>setMode('target'));
+
+  function setInstrument(name){
+    inst = name;
+    instGuitarBtn.classList.toggle('active', name==='guitar');
+    instBassBtn.classList.toggle('active', name==='bass');
+    // start at the instrument's open low string (E1 for bass, E2 for guitar)
+    targetMidi = RANGES[inst].lo;
+    // bass fundamentals are very weak on phone speakers — default to +1 octave
+    playOctave = (name==='bass') ? 1 : 0;
+    octValEl.textContent = (playOctave>0?'+':'') + playOctave;
+    recentMidi.length = 0;
+    renderTarget();
+  }
+  instGuitarBtn.addEventListener('click', ()=>setInstrument('guitar'));
+  instBassBtn.addEventListener('click', ()=>setInstrument('bass'));
+
+  document.getElementById('oct-up').addEventListener('click', ()=>{
+    playOctave = Math.min(2, playOctave+1);
+    octValEl.textContent = (playOctave>0?'+':'') + playOctave;
+    updateRefTone();
+  });
+  document.getElementById('oct-down').addEventListener('click', ()=>{
+    playOctave = Math.max(-1, playOctave-1);
+    octValEl.textContent = (playOctave>0?'+':'') + playOctave;
+    updateRefTone();
+  });
 })();
 </script>
 </body>
