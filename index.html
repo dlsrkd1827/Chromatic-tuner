@@ -245,56 +245,57 @@
     return {name, octave, cents, midi: rounded};
   }
 
-  // autocorrelation pitch detection, restricted to a plausible lag range,
-  // with sub-harmonic correction to avoid octave-up errors on low strings (E1 etc).
+  // NSDF (McLeod Pitch Method) — normalized autocorrelation.
+  // Picking the FIRST peak that clears 0.9*maxPeak is what prevents octave errors
+  // in both directions (harmonic picked instead of fundamental, and vice versa).
   function autoCorrelate(buf, sampleRate){
     const SIZE = buf.length;
     let rms = 0;
-    for(let i=0;i<SIZE;i++){ const v=buf[i]; rms += v*v; }
+    for(let i=0;i<SIZE;i++){ rms += buf[i]*buf[i]; }
     rms = Math.sqrt(rms/SIZE);
     if(rms < 0.01) return -1; // too quiet
 
-    // only search lags corresponding to ~24Hz .. ~1300Hz (covers full guitar range with margin)
-    const minLag = Math.floor(sampleRate/1300);
-    const maxLag = Math.min(SIZE-2, Math.ceil(sampleRate/24));
+    const minLag = Math.max(2, Math.floor(sampleRate/1300));
+    const maxLag = Math.min(SIZE-2, Math.ceil(sampleRate/28));
 
-    const c = new Float64Array(maxLag+1);
-    for(let lag=minLag; lag<=maxLag; lag++){
-      let sum=0;
-      const n = SIZE - lag;
-      for(let i=0;i<n;i++){ sum += buf[i]*buf[i+lag]; }
-      c[lag] = sum / n; // normalize by count so longer lags aren't unfairly penalized
-    }
-
-    // find global best lag in range
-    let maxval=-Infinity, maxpos=-1;
-    for(let lag=minLag; lag<=maxLag; lag++){
-      if(c[lag]>maxval){ maxval=c[lag]; maxpos=lag; }
-    }
-    if(maxpos<0 || maxval<=0) return -1;
-
-    // sub-harmonic correction: if a LONGER lag (lower frequency) also correlates
-    // almost as strongly, prefer it — this is what fixes "E1 detected as E3".
-    let bestLag = maxpos;
-    for(let mult=2; mult<=4; mult++){
-      const cand = Math.round(maxpos * mult);
-      if(cand > maxLag) break;
-      // check a small neighborhood around the candidate for its true local peak
-      let localBest=-Infinity, localPos=-1;
-      const lo = Math.max(minLag, cand-2), hi = Math.min(maxLag, cand+2);
-      for(let l=lo; l<=hi; l++){ if(c[l]>localBest){ localBest=c[l]; localPos=l; } }
-      if(localPos>0 && localBest >= maxval*0.85){
-        bestLag = localPos; // keep checking larger multiples too
+    const nsdf = new Float64Array(maxLag+2);
+    for(let tau=minLag; tau<=maxLag; tau++){
+      let r=0, m=0;
+      const n = SIZE - tau;
+      for(let i=0;i<n;i++){
+        r += buf[i]*buf[i+tau];
+        m += buf[i]*buf[i] + buf[i+tau]*buf[i+tau];
       }
+      nsdf[tau] = m>0 ? (2*r/m) : 0;
     }
 
-    let T0 = bestLag;
-    // parabolic interpolation around chosen lag
-    const x1=c[T0-1]!==undefined?c[T0-1]:c[T0], x2=c[T0], x3=c[T0+1]!==undefined?c[T0+1]:c[T0];
-    const a=(x1+x3-2*x2)/2, b=(x3-x1)/2;
+    // local maxima following a positive-going zero crossing
+    const peaks = [];
+    let tau = minLag;
+    while(tau < maxLag && nsdf[tau] > 0) tau++;
+    while(tau < maxLag){
+      if(nsdf[tau] > 0 && nsdf[tau] >= nsdf[tau-1]){
+        while(tau < maxLag && nsdf[tau] >= nsdf[tau-1]) tau++;
+        peaks.push(tau-1);
+        while(tau < maxLag && nsdf[tau] <= 0) tau++;
+      } else tau++;
+    }
+    if(!peaks.length) return -1;
+
+    let maxPeak = 0;
+    for(const p of peaks) if(nsdf[p] > maxPeak) maxPeak = nsdf[p];
+    if(maxPeak < 0.3) return -1; // no clear periodicity (noise / muted string)
+
+    let chosen = peaks[0];
+    for(const p of peaks){ if(nsdf[p] >= 0.9*maxPeak){ chosen = p; break; } }
+
+    let T0 = chosen;
+    const y1=nsdf[T0-1], y2=nsdf[T0], y3=nsdf[T0+1];
+    const a=(y1+y3-2*y2)/2, b=(y3-y1)/2;
     if(a) T0 = T0 - b/(2*a);
+
     const freq = sampleRate/T0;
-    if(freq < 24 || freq > 1300) return -1;
+    if(freq < 28 || freq > 1300) return -1;
     return freq;
   }
 
@@ -410,40 +411,47 @@
     a4 = Math.max(400, a4-1); a4valEl.textContent=a4; a4eyebrow.textContent=a4;
   });
 
+  // reference tone playback — a plain sine wave at the target frequency,
+  // on its own AudioContext so it works whether or not the mic is running.
+  // Declared before renderTarget() because that function reads refOsc.
+  let refAudioCtx = null, refOsc = null, refGain = null, refPlaying = false;
+  const targetPlayBtn = document.getElementById('target-play');
+
   function renderTarget(){
     const t = midiToName(targetMidi);
     targetNameEl.textContent = t.name + t.octave;
-    const fret = targetMidi - 40; // 0 = E2 (open low E)
-    targetFretEl.textContent = 'FRET ' + fret;
-    if(refOsc){ refOsc.frequency.setValueAtTime(midiToFreq(targetMidi), refAudioCtx.currentTime); }
+    const idx = targetMidi - 40 + 1;   // 1 = E2 (표의 번호 1), 40 = G5
+    targetFretEl.textContent = 'NO.' + idx + ' · +' + (targetMidi - 40) + '반음';
+    if(refOsc && refAudioCtx){
+      try{ refOsc.frequency.setValueAtTime(midiToFreq(targetMidi), refAudioCtx.currentTime); }catch(e){}
+    }
   }
   renderTarget();
 
   document.getElementById('target-prev').addEventListener('click', ()=>{
-    targetMidi = Math.max(28, targetMidi-1); renderTarget();
+    targetMidi = Math.max(40, targetMidi-1); renderTarget();  // 40 = E2, 6번줄 개방현
   });
   document.getElementById('target-next').addEventListener('click', ()=>{
-    targetMidi = Math.min(88, targetMidi+1); renderTarget();
+    targetMidi = Math.min(79, targetMidi+1); renderTarget();  // 79 = G5, 1번줄 15프렛
   });
 
-  // reference tone playback — a plain sine wave at the target frequency,
-  // on its own AudioContext so it works whether or not the mic is running.
-  let refAudioCtx, refOsc, refGain, refPlaying = false;
-  const targetPlayBtn = document.getElementById('target-play');
-
   function startRefTone(){
-    refAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    refOsc = refAudioCtx.createOscillator();
-    refGain = refAudioCtx.createGain();
-    refOsc.type = 'sine';
-    refOsc.frequency.setValueAtTime(midiToFreq(targetMidi), refAudioCtx.currentTime);
-    refGain.gain.setValueAtTime(0, refAudioCtx.currentTime);
-    refGain.gain.linearRampToValueAtTime(0.25, refAudioCtx.currentTime + 0.05); // avoid click
-    refOsc.connect(refGain).connect(refAudioCtx.destination);
-    refOsc.start();
-    refPlaying = true;
-    targetPlayBtn.classList.add('playing');
-    targetPlayBtn.textContent = '정지';
+    try{
+      refAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      refOsc = refAudioCtx.createOscillator();
+      refGain = refAudioCtx.createGain();
+      refOsc.type = 'sine';
+      refOsc.frequency.setValueAtTime(midiToFreq(targetMidi), refAudioCtx.currentTime);
+      refGain.gain.setValueAtTime(0, refAudioCtx.currentTime);
+      refGain.gain.linearRampToValueAtTime(0.25, refAudioCtx.currentTime + 0.05); // avoid click
+      refOsc.connect(refGain).connect(refAudioCtx.destination);
+      refOsc.start();
+      refPlaying = true;
+      targetPlayBtn.classList.add('playing');
+      targetPlayBtn.textContent = '정지';
+    }catch(e){
+      refAudioCtx = null; refOsc = null; refGain = null; refPlaying = false;
+    }
   }
   function stopRefTone(){
     if(refGain && refAudioCtx){
