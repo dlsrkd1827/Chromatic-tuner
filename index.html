@@ -118,7 +118,7 @@
     width:44px; height:44px; border-radius:12px; border:1px solid #35302a;
     background:#211d19; color:var(--amber); font-size:20px; cursor:pointer;
   }
-  .target-row button#target-play{ font-size:15px; }
+  .target-row button#target-play{ font-size:13px; width:52px; }
   .target-row button#target-play.playing{
     background:linear-gradient(180deg, #3a2e12, #241c0c);
     border-color:var(--amber-dim); color:var(--green);
@@ -169,7 +169,7 @@
         <div class="tfret" id="target-fret">FRET 0</div>
       </div>
       <button id="target-next">▶</button>
-      <button id="target-play" title="기준음 듣기">▶︎♪</button>
+      <button id="target-play" title="기준음 듣기">재생</button>
     </div>
 
     <div class="row">
@@ -443,7 +443,7 @@
     refOsc.start();
     refPlaying = true;
     targetPlayBtn.classList.add('playing');
-    targetPlayBtn.textContent = '■';
+    targetPlayBtn.textContent = '정지';
   }
   function stopRefTone(){
     if(refGain && refAudioCtx){
@@ -455,7 +455,7 @@
     refOsc = null; refGain = null; refAudioCtx = null;
     refPlaying = false;
     targetPlayBtn.classList.remove('playing');
-    targetPlayBtn.textContent = '▶︎♪';
+    targetPlayBtn.textContent = '재생';
   }
   targetPlayBtn.addEventListener('click', ()=>{ refPlaying ? stopRefTone() : startRefTone(); });
 
